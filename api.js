@@ -104,56 +104,51 @@ function signToken(payload) {
 
 // Получить капчу
 export async function refreshCaptcha(city, cookies) {
-  // Шаг 1: если куки нет — заходим на страницу логина чтобы получить начальные куки
-  let currentCookies = cookies || ""
-  if (!currentCookies) {
-    const loginPage = await fetch(
-      `https://sms.${city}.nis.edu.kz/root/Account/Login`,
-      {
-        headers: {
-          "user-agent": FAKE_USER_AGENT,
-          "accept-language": "ru-RU,ru;q=0.9",
-        },
-        redirect: "follow",
-      }
-    )
-    const pageCookies = cookieParse(loginPage)
-    if (pageCookies) currentCookies = pageCookies
-  }
+  const baseUrl = `https://sms.${city}.nis.edu.kz`
 
-  // Шаг 2: мержим с lang
-  const mergedCookies = mergeCookies(currentCookies, "lang=ru-RU; path=/")
+  // Шаг 1: заходим на страницу логина — получаем начальные куки (всегда, не только если пустые)
+  const loginPage = await fetch(`${baseUrl}/root/Account/Login`, {
+    headers: {
+      "user-agent": FAKE_USER_AGENT,
+      "accept-language": "ru-RU,ru;q=0.9",
+      "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    },
+    redirect: "follow",
+  })
+  const pageCookies = cookieParse(loginPage)
+  let currentCookies = mergeCookies(cookies || "", pageCookies || "")
+  currentCookies = mergeCookies(currentCookies, "lang=ru-RU; path=/")
 
-  // Шаг 3: запрашиваем капчу
-  const response = await fetch(
-    `https://sms.${city}.nis.edu.kz/root/Account/RefreshCaptcha`,
-    {
-      headers: {
-        cookie: mergedCookies,
-        "user-agent": FAKE_USER_AGENT,
-        "x-requested-with": "XMLHttpRequest",
-        referer: `https://sms.${city}.nis.edu.kz/root/Account/Login`,
-      },
-    }
-  )
+  // Шаг 2: запрашиваем капчу
+  const response = await fetch(`${baseUrl}/root/Account/RefreshCaptcha`, {
+    headers: {
+      cookie: currentCookies,
+      "user-agent": FAKE_USER_AGENT,
+      "x-requested-with": "XMLHttpRequest",
+      "accept": "application/json, text/javascript, */*; q=0.01",
+      "referer": `${baseUrl}/root/Account/Login`,
+    },
+  })
 
   const newCookies = cookieParse(response)
-  const merged = mergeCookies(mergedCookies, newCookies || "")
+  const merged = mergeCookies(currentCookies, newCookies || "")
 
   const text = await response.text()
   let json
   try {
     json = JSON.parse(text)
   } catch {
-    throw new Error("Сервер вернул неожиданный ответ: " + text.slice(0, 100))
+    throw new Error("Сервер вернул неожиданный ответ: " + text.slice(0, 200))
   }
 
-  if (!json.data?.base64img) {
-    throw new Error(json.message || "Не удалось загрузить капчу")
+  // Берём картинку даже если success=false — сервер иногда возвращает капчу с success:false
+  const img = json.data?.base64img
+  if (!img) {
+    throw new Error("Капча не получена. Ответ сервера: " + JSON.stringify(json).slice(0, 200))
   }
 
   return {
-    captcha: json.data.base64img,
+    captcha: img,
     cookies: merged,
   }
 }

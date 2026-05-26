@@ -190,12 +190,12 @@ async function sendCaptcha(chatId, session) {
     const msg = await bot.sendMessage(chatId, "⏳ Загружаю капчу...")
     const result = await refreshCaptcha(session.data.city, session.data.cookies || "")
     session.data.cookies = result.cookies || session.data.cookies || ""
-    session.data.captchaToken = result.token
 
     const imageBuffer = Buffer.from(result.captcha, "base64")
     await bot.deleteMessage(chatId, msg.message_id).catch(() => {})
     await bot.sendPhoto(chatId, imageBuffer, { caption: "🔢 Введи текст с картинки:" })
   } catch (e) {
+    console.error("Captcha error:", e.message)
     await bot.sendMessage(chatId, `❌ Ошибка загрузки капчи: ${e.message}\nПопробуй /login ещё раз.`)
     session.step = "idle"
   }
