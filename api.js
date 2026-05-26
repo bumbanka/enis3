@@ -102,6 +102,12 @@ function signToken(payload) {
   return jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "7d" })
 }
 
+// Создать токен из куки .ASPXAUTH (для ручного входа через браузер)
+export function createTokenFromCookies(existingCookies, aspxauth, login, city) {
+  const fullCookie = mergeCookies(existingCookies, `.ASPXAUTH=${aspxauth}`)
+  return signToken({ cookies: fullCookie, account: { login, city } })
+}
+
 // Получить капчу
 // Получить куки со страницы логина + sitekey reCAPTCHA
 export async function getLoginSession(city) {

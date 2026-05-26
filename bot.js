@@ -1,5 +1,5 @@
 import TelegramBot from "node-telegram-bot-api"
-import { loginUser, getLoginSession, getYears, getTerms, getGrades, getDiary } from "./api.js"
+import { loginUser, getLoginSession, getYears, getTerms, getGrades, getDiary, createTokenFromCookies } from "./api.js"
 import { encrypt, decrypt } from "./crypto.js"
 import dotenv from "dotenv"
 dotenv.config()
@@ -174,13 +174,13 @@ bot.on("message", async (msg) => {
 
   if (session.step === "enter_password") {
     session.data.password = text
-    session.step = "solving_captcha"
-    await sendCaptcha(chatId, session)
+    session.step = "logging_in"
+    // Сначала пробуем войти без капчи — как делает enis2
+    await tryLoginNoCaptcha(chatId, session)
     return
   }
 
   if (session.step === "enter_captcha") {
-    // Пользователь прислал токен капчи
     const token = text.trim()
     if (token.length < 20) {
       await bot.sendMessage(chatId, "❌ Токен слишком короткий. Скопируй полный текст из консоли браузера:")
@@ -239,34 +239,60 @@ ${loginUrl}
   }
 }
 
-async function tryLogin(chatId, session, captchaInput) {
+async function tryLoginNoCaptcha(chatId, session) {
   try {
     await bot.sendMessage(chatId, "⏳ Выполняю вход...")
+    // Получаем куки со страницы логина
+    const { cookies } = await getLoginSession(session.data.city)
+    session.data.cookies = cookies
+    // Пробуем войти без капчи
     const result = await loginUser({
       city: session.data.city,
       login: session.data.login,
       password: session.data.password,
-      captchaInput,
-      cookies: session.data.cookies || "",
+      captchaInput: "",
+      cookies,
     })
     session.token = result.token
-    session.data.city = session.data.city
     session.step = "idle"
-
-    await bot.sendMessage(
-      chatId,
-      "✅ Вход выполнен! Выбери действие:",
-      mainMenu()
-    )
+    await bot.sendMessage(chatId, "✅ Вход выполнен! Выбери действие:", mainMenu())
   } catch (e) {
-    if (e.message?.includes("капч") || e.message?.includes("captcha") || e.message?.includes("Captcha")) {
+    console.error("Login error:", e.message)
+    // Если сервер требует капчу — просим ввести вручную
+    if (e.message?.toLowerCase().includes("капч") || e.message?.toLowerCase().includes("captcha")) {
       session.step = "enter_captcha"
-      await bot.sendMessage(chatId, "❌ Неверная капча. Попробуй ещё раз:")
-      await sendCaptcha(chatId, session)
+      const loginUrl = `https://sms.${session.data.city}.nis.edu.kz/root/Account/Login`
+      await bot.sendMessage(chatId,
+        `🔐 *Сервер требует капчу.*\n\n` +
+        `1. Открой: ${loginUrl}\n` +
+        `2. Введи свой логин и пароль на сайте\n` +
+        `3. Реши капчу и войди\n` +
+        `4. Открой F12 → Application → Cookies\n` +
+        `5. Скопируй значение куки \`.ASPXAUTH\` и отправь сюда 👇`,
+        { parse_mode: "Markdown" }
+      )
     } else {
-      await bot.sendMessage(chatId, `❌ Ошибка входа: ${e.message}\nПопробуй /login ещё раз.`)
+      await bot.sendMessage(chatId, `❌ Ошибка: ${e.message}\nПопробуй /login ещё раз.`)
       session.step = "idle"
     }
+  }
+}
+
+async function tryLogin(chatId, session, aspxauthCookie) {
+  try {
+    await bot.sendMessage(chatId, "⏳ Пробую войти через куки...")
+    const token = createTokenFromCookies(
+      session.data.cookies || "",
+      aspxauthCookie,
+      session.data.login,
+      session.data.city
+    )
+    session.token = token
+    session.step = "idle"
+    await bot.sendMessage(chatId, "✅ Вход выполнен! Выбери действие:", mainMenu())
+  } catch (e) {
+    await bot.sendMessage(chatId, `❌ Ошибка: ${e.message}\nПопробуй /login ещё раз.`)
+    session.step = "idle"
   }
 }
 
