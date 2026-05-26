@@ -1,5 +1,5 @@
 import TelegramBot from "node-telegram-bot-api"
-import { loginUser, refreshCaptcha, getYears, getTerms, getGrades, getDiary } from "./api.js"
+import { loginUser, getLoginSession, getYears, getTerms, getGrades, getDiary } from "./api.js"
 import { encrypt, decrypt } from "./crypto.js"
 import dotenv from "dotenv"
 dotenv.config()
@@ -174,29 +174,67 @@ bot.on("message", async (msg) => {
 
   if (session.step === "enter_password") {
     session.data.password = text
-    session.step = "enter_captcha"
+    session.step = "solving_captcha"
     await sendCaptcha(chatId, session)
     return
   }
 
   if (session.step === "enter_captcha") {
-    await tryLogin(chatId, session, text)
+    // Пользователь прислал токен капчи
+    const token = text.trim()
+    if (token.length < 20) {
+      await bot.sendMessage(chatId, "❌ Токен слишком короткий. Скопируй полный текст из консоли браузера:")
+      return
+    }
+    await tryLogin(chatId, session, token)
     return
   }
 })
 
 async function sendCaptcha(chatId, session) {
   try {
-    const msg = await bot.sendMessage(chatId, "⏳ Загружаю капчу...")
-    const result = await refreshCaptcha(session.data.city, session.data.cookies || "")
-    session.data.cookies = result.cookies || session.data.cookies || ""
-
-    const imageBuffer = Buffer.from(result.captcha, "base64")
+    const msg = await bot.sendMessage(chatId, "⏳ Получаю сессию...")
+    const { cookies, sitekey } = await getLoginSession(session.data.city)
+    session.data.cookies = cookies
     await bot.deleteMessage(chatId, msg.message_id).catch(() => {})
-    await bot.sendPhoto(chatId, imageBuffer, { caption: "🔢 Введи текст с картинки:" })
+
+    if (sitekey) {
+      // Отправляем инструкцию для ручного решения капчи
+      session.step = "enter_captcha"
+      const loginUrl = `https://sms.${session.data.city}.nis.edu.kz/root/Account/Login`
+      await bot.sendMessage(chatId,
+        `🔐 *Нужно решить капчу вручную:*
+
+` +
+        `1. Открой эту ссылку:
+${loginUrl}
+
+` +
+        `2. Реши капчу (галочка "Я не робот")
+
+` +
+        `3. Открой консоль браузера:
+` +
+        `   • На ПК: нажми *F12* → вкладка *Console*
+` +
+        `   • На телефоне: используй браузер Kiwi → F12
+
+` +
+        `4. Вставь эту команду и нажми Enter:
+` +
+        `\`grecaptcha.getResponse()\`
+
+` +
+        `5. Скопируй длинный текст который появится (начинается с 03A...) и отправь его сюда 👇`,
+        { parse_mode: "Markdown" }
+      )
+    } else {
+      // Капчи нет — логинимся сразу
+      await tryLogin(chatId, session, "")
+    }
   } catch (e) {
     console.error("Captcha error:", e.message)
-    await bot.sendMessage(chatId, `❌ Ошибка загрузки капчи: ${e.message}\nПопробуй /login ещё раз.`)
+    await bot.sendMessage(chatId, `❌ Ошибка: ${e.message}\nПопробуй /login ещё раз.`)
     session.step = "idle"
   }
 }

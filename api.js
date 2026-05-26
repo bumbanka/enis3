@@ -103,10 +103,10 @@ function signToken(payload) {
 }
 
 // Получить капчу
-export async function refreshCaptcha(city, cookies) {
+// Получить куки со страницы логина + sitekey reCAPTCHA
+export async function getLoginSession(city) {
   const baseUrl = `https://sms.${city}.nis.edu.kz`
 
-  // Шаг 1: заходим на страницу логина — получаем начальные куки (всегда, не только если пустые)
   const loginPage = await fetch(`${baseUrl}/root/Account/Login`, {
     headers: {
       "user-agent": FAKE_USER_AGENT,
@@ -116,11 +116,10 @@ export async function refreshCaptcha(city, cookies) {
     redirect: "follow",
   })
   const pageCookies = cookieParse(loginPage)
-  let currentCookies = mergeCookies(cookies || "", pageCookies || "")
-  currentCookies = mergeCookies(currentCookies, "lang=ru-RU; path=/")
+  let currentCookies = mergeCookies(pageCookies || "", "lang=ru-RU; path=/")
 
-  // Шаг 2: запрашиваем капчу
-  const response = await fetch(`${baseUrl}/root/Account/RefreshCaptcha`, {
+  // Получаем sitekey из RefreshCaptcha
+  const capResponse = await fetch(`${baseUrl}/root/Account/RefreshCaptcha`, {
     headers: {
       cookie: currentCookies,
       "user-agent": FAKE_USER_AGENT,
@@ -129,28 +128,39 @@ export async function refreshCaptcha(city, cookies) {
       "referer": `${baseUrl}/root/Account/Login`,
     },
   })
+  const newCookies = cookieParse(capResponse)
+  if (newCookies) currentCookies = mergeCookies(currentCookies, newCookies)
 
-  const newCookies = cookieParse(response)
-  const merged = mergeCookies(currentCookies, newCookies || "")
+  const capJson = await capResponse.json().catch(() => ({}))
+  const sitekey = capJson.data?.captchaData || null
 
-  const text = await response.text()
-  let json
-  try {
-    json = JSON.parse(text)
-  } catch {
-    throw new Error("Сервер вернул неожиданный ответ: " + text.slice(0, 200))
+  return { cookies: currentCookies, sitekey }
+}
+
+// Решить reCAPTCHA через 2captcha
+export async function solveRecaptcha(sitekey, pageUrl) {
+  const apiKey = process.env.TWOCAPTCHA_KEY
+  if (!apiKey) throw new Error("TWOCAPTCHA_KEY не задан в .env")
+
+  // Отправить задачу
+  const submitRes = await fetch(
+    `https://2captcha.com/in.php?key=${apiKey}&method=userrecaptcha&googlekey=${sitekey}&pageurl=${pageUrl}&json=1`
+  )
+  const submitJson = await submitRes.json()
+  if (submitJson.status !== 1) throw new Error("2captcha отклонил задачу: " + submitJson.request)
+  const taskId = submitJson.request
+
+  // Ждём решения (до 2 минут)
+  for (let i = 0; i < 24; i++) {
+    await new Promise(r => setTimeout(r, 5000))
+    const resRes = await fetch(
+      `https://2captcha.com/res.php?key=${apiKey}&action=get&id=${taskId}&json=1`
+    )
+    const resJson = await resRes.json()
+    if (resJson.status === 1) return resJson.request
+    if (resJson.request !== "CAPCHA_NOT_READY") throw new Error("2captcha ошибка: " + resJson.request)
   }
-
-  // Берём картинку даже если success=false — сервер иногда возвращает капчу с success:false
-  const img = json.data?.base64img
-  if (!img) {
-    throw new Error("Капча не получена. Ответ сервера: " + JSON.stringify(json).slice(0, 200))
-  }
-
-  return {
-    captcha: img,
-    cookies: merged,
-  }
+  throw new Error("2captcha: время ожидания истекло")
 }
 
 // Войти в систему
