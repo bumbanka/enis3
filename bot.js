@@ -94,8 +94,9 @@ bot.onText(/\/setcookies (.+)/, async (msg, match) => {
   const session = getSession(chatId)
   const cookieStr = match[1].trim()
 
-  if (!cookieStr.includes(".ASPXAUTH")) {
-    await bot.sendMessage(chatId, "❌ Куки должны содержать .ASPXAUTH. Попробуй ещё раз.")
+  const hasAuth = cookieStr.includes("ApplicationAuth") || cookieStr.includes(".ASPXAUTH") || cookieStr.includes("SessionID")
+  if (!hasAuth) {
+    await bot.sendMessage(chatId, "❌ Куки не содержат токен авторизации. Убедись что скопировал все куки после входа.")
     return
   }
 
@@ -147,11 +148,12 @@ ${baseUrl}/root/Account/Login
       `3. После входа открой F12, вкладка Application, затем Cookies, выбери сайт
 
 ` +
-      `4. Найди куку .ASPXAUTH и скопируй её значение
+      `4. Найди куки ApplicationAuth, Uralsk_SessionID, UserSessionKey, sessionid2 и скопируй их значения в формате:
+Название=Значение; Название2=Значение2
 
 ` +
-      `5. Отправь боту команду:
-/setcookies ЗНАЧЕНИЕ_КУКИ
+      `5. Отправь боту:
+/setcookies ApplicationAuth=XXX; Uralsk_SessionID=YYY; UserSessionKey=ZZZ
 
 ` +
       `Куки действуют несколько дней, потом нужно повторить.`
