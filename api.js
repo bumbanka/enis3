@@ -173,7 +173,7 @@ export async function solveRecaptcha(sitekey, pageUrl) {
 export async function loginUser({ city, login, password }) {
   const baseUrl = `https://sms.${city}.nis.edu.kz`
 
-  // Шаг 1: получаем начальные куки со страницы логина
+  // Шаг 1: загружаем страницу логина — получаем куки и verification token
   const loginPage = await fetch(`${baseUrl}/root/Account/Login`, {
     headers: {
       "user-agent": FAKE_USER_AGENT,
@@ -185,13 +185,21 @@ export async function loginUser({ city, login, password }) {
   const pageCookies = cookieParse(loginPage) || ""
   let cookies = mergeCookies(pageCookies, "lang=ru-RU; path=/")
 
-  // Шаг 2: логинимся
+  // Шаг 2: вытаскиваем __RequestVerificationToken из HTML
+  const html = await loginPage.text()
+  const tokenMatch = html.match(/name="__RequestVerificationToken"[^>]*value="([^"]+)"/)
+  const verificationToken = tokenMatch ? tokenMatch[1] : ""
+
+  // Шаг 3: логинимся
   const params = new URLSearchParams()
   params.append("login", login)
   params.append("password", password)
   params.append("captchaInput", "")
   params.append("twoFactorAuthCode", "")
   params.append("application2FACode", "")
+  if (verificationToken) {
+    params.append("__RequestVerificationToken", verificationToken)
+  }
 
   const res = await fetch(`${baseUrl}/root/Account/LogOn`, {
     method: "POST",
@@ -202,6 +210,7 @@ export async function loginUser({ city, login, password }) {
       "x-requested-with": "XMLHttpRequest",
       "accept": "application/json, text/javascript, */*; q=0.01",
       "referer": `${baseUrl}/root/Account/Login`,
+      "origin": baseUrl,
     },
     body: params,
   })
