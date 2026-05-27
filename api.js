@@ -239,10 +239,18 @@ export async function loginUser({ city, login, password }) {
 // Получить учебные годы
 export async function getYears(token, city) {
   const { cookies } = getSessionFromToken(token)
-  const result = await nisApi({
-    url: `https://sms.${city}.nis.edu.kz/Ref/GetSchoolYears?fullData=true`,
-    cookie: cookies,
-  })
+  console.log("getYears cookies:", cookies.slice(0, 200))
+  console.log("getYears city:", city)
+  let result
+  try {
+    result = await nisApi({
+      url: `https://sms.${city}.nis.edu.kz/Ref/GetSchoolYears?fullData=true`,
+      cookie: cookies,
+    })
+  } catch(e) {
+    console.log("getYears error:", e.message, "code:", e.code)
+    throw e
+  }
   const newToken = signToken({ cookies: result.resCookie ? mergeCookies(cookies, result.resCookie) : cookies, account: decodeToken(token).account })
   return {
     data: result.data.map((year) => ({
