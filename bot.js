@@ -1,5 +1,5 @@
 import TelegramBot from "node-telegram-bot-api"
-import { loginUser, getYears, getTerms, getGrades, getDiary } from "./api.js"
+import { getYears, getTerms, getGrades, getDiary, createTokenFromCookies } from "./api.js"
 import dotenv from "dotenv"
 dotenv.config()
 
@@ -88,6 +88,31 @@ bot.onText(/\/login/, async (msg) => {
   })
 })
 
+// /setcookies — ручной вход через куки браузера
+bot.onText(/\/setcookies (.+)/, async (msg, match) => {
+  const chatId = msg.chat.id
+  const session = getSession(chatId)
+  const cookieStr = match[1].trim()
+
+  if (!cookieStr.includes(".ASPXAUTH")) {
+    await bot.sendMessage(chatId, "❌ Куки должны содержать .ASPXAUTH. Попробуй ещё раз.")
+    return
+  }
+
+  // Определяем город из session или просим выбрать
+  if (!session.data.city) {
+    session.data.pendingCookies = cookieStr
+    session.step = "choose_city_for_cookies"
+    const buttons = CITIES.map((c) => [{ text: c.name, callback_data: `cookies_city_${c.code}` }])
+    const chunks = []
+    for (let i = 0; i < buttons.length; i += 2) chunks.push(buttons.slice(i, i + 2).flat())
+    await bot.sendMessage(chatId, "🏙 Выбери свой город:", { reply_markup: { inline_keyboard: chunks } })
+    return
+  }
+
+  await saveCookies(chatId, session, cookieStr)
+})
+
 // Обработка callback кнопок
 bot.on("callback_query", async (query) => {
   const chatId = query.message.chat.id
@@ -100,8 +125,41 @@ bot.on("callback_query", async (query) => {
   if (data.startsWith("city_")) {
     const city = data.replace("city_", "")
     session.data.city = city
-    session.step = "enter_login"
-    await bot.sendMessage(chatId, "📝 Введи свой логин (12 цифр, ИИН):")
+    session.step = "waiting_cookies"
+    const baseUrl = `https://sms.${city}.nis.edu.kz`
+    await bot.sendMessage(chatId,
+      `✅ Город выбран!
+
+` +
+      `Так как НИС требует капчу для входа через бота, нужно передать куки из браузера.
+
+` +
+      `*Как это сделать (1 раз):*
+` +
+      `1. Открой ${baseUrl}/root/Account/Login в браузере
+` +
+      `2. Войди со своим логином и паролем
+` +
+      `3. После входа нажми F12 → вкладка *Application* → *Cookies* → выбери сайт
+` +
+      `4. Найди куку *.ASPXAUTH* и скопируй её значение
+` +
+      `5. Отправь боту: /setcookies ЗНАЧЕНИЕ_КУКИ
+
+` +
+      `_Куки действуют несколько дней, потом нужно повторить_`,
+      { parse_mode: "Markdown" }
+    )
+    return
+  }
+
+  // Выбор города для setcookies
+  if (data.startsWith("cookies_city_")) {
+    const city = data.replace("cookies_city_", "")
+    session.data.city = city
+    const cookieStr = session.data.pendingCookies
+    session.data.pendingCookies = null
+    await saveCookies(chatId, session, cookieStr)
     return
   }
 
@@ -160,44 +218,10 @@ bot.on("message", async (msg) => {
   }
 
   // Шаги авторизации
-  if (session.step === "enter_login") {
-    if (!/^\d{12}$/.test(text)) {
-      await bot.sendMessage(chatId, "❌ Логин должен состоять из 12 цифр. Попробуй ещё раз:")
-      return
-    }
-    session.data.login = text
-    session.step = "enter_password"
-    await bot.sendMessage(chatId, "🔑 Введи пароль:")
-    return
-  }
 
-  if (session.step === "enter_password") {
-    session.data.password = text
-    session.step = "logging_in"
-    await doLogin(chatId, session)
-    return
-  }
+
+
 })
-
-async function doLogin(chatId, session) {
-  try {
-    await bot.sendMessage(chatId, "⏳ Выполняю вход...")
-    const result = await loginUser({
-      city: session.data.city,
-      login: session.data.login,
-      password: session.data.password,
-    })
-    session.token = result.token
-    session.step = "idle"
-    await bot.sendMessage(chatId, "✅ Вход выполнен! Выбери действие:", mainMenu())
-  } catch (e) {
-    console.error("Login error:", e.message)
-    await bot.sendMessage(chatId, `❌ Ошибка входа: ${e.message}
-
-Проверь логин и пароль и попробуй /login ещё раз.`)
-    session.step = "idle"
-  }
-}
 
 
 async function startGrades(chatId, session) {
@@ -337,3 +361,14 @@ async function handleError(chatId, session, error) {
 }
 
 console.log("🤖 Бот запущен!")
+
+async function saveCookies(chatId, session, cookieStr) {
+  try {
+    const token = await createTokenFromCookies(cookieStr, session.data.city)
+    session.token = token
+    session.step = "idle"
+    await bot.sendMessage(chatId, "✅ Куки сохранены! Выбери действие:", mainMenu())
+  } catch (e) {
+    await bot.sendMessage(chatId, `❌ Ошибка: ${e.message}`)
+  }
+}
