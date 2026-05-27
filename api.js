@@ -216,11 +216,14 @@ export async function loginUser({ city, login, password }) {
   })
 
   const text = await res.text()
+  console.log("NIS login response:", text.slice(0, 500))
+  console.log("NIS login status:", res.status)
+  console.log("Verification token found:", !!verificationToken)
   let body
   try {
     body = JSON.parse(text)
   } catch {
-    throw new Error("Сервер вернул неожиданный ответ: " + text.slice(0, 100))
+    throw new Error("Сервер вернул неожиданный ответ: " + text.slice(0, 200))
   }
 
   if (!body.success) {
