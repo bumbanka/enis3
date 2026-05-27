@@ -170,34 +170,56 @@ export async function solveRecaptcha(sitekey, pageUrl) {
 }
 
 // Войти в систему
-export async function loginUser({ city, login, password, captchaInput, cookies }) {
-  const mergedCookies = mergeCookies(cookies, "lang=ru-RU; path=/")
+export async function loginUser({ city, login, password }) {
+  const baseUrl = `https://sms.${city}.nis.edu.kz`
+
+  // Шаг 1: получаем начальные куки со страницы логина
+  const loginPage = await fetch(`${baseUrl}/root/Account/Login`, {
+    headers: {
+      "user-agent": FAKE_USER_AGENT,
+      "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "accept-language": "ru-RU,ru;q=0.9",
+    },
+    redirect: "follow",
+  })
+  const pageCookies = cookieParse(loginPage) || ""
+  let cookies = mergeCookies(pageCookies, "lang=ru-RU; path=/")
+
+  // Шаг 2: логинимся
   const params = new URLSearchParams()
   params.append("login", login)
   params.append("password", password)
-  params.append("captchaInput", captchaInput || "")
+  params.append("captchaInput", "")
   params.append("twoFactorAuthCode", "")
   params.append("application2FACode", "")
 
-  const res = await fetch(
-    `https://sms.${city}.nis.edu.kz/root/Account/LogOn`,
-    {
-      method: "POST",
-      headers: {
-        cookie: mergedCookies,
-        "user-agent": FAKE_USER_AGENT,
-      },
-      body: params,
-    }
-  )
+  const res = await fetch(`${baseUrl}/root/Account/LogOn`, {
+    method: "POST",
+    headers: {
+      cookie: cookies,
+      "user-agent": FAKE_USER_AGENT,
+      "content-type": "application/x-www-form-urlencoded",
+      "x-requested-with": "XMLHttpRequest",
+      "accept": "application/json, text/javascript, */*; q=0.01",
+      "referer": `${baseUrl}/root/Account/Login`,
+    },
+    body: params,
+  })
 
-  const body = await res.json()
+  const text = await res.text()
+  let body
+  try {
+    body = JSON.parse(text)
+  } catch {
+    throw new Error("Сервер вернул неожиданный ответ: " + text.slice(0, 100))
+  }
+
   if (!body.success) {
-    throw new Error(body.message || "Ошибка входа")
+    throw new Error(body.message || "Неверный логин или пароль")
   }
 
   const updatedCookies = cookieParse(res)
-  const finalCookies = mergeCookies(mergedCookies, updatedCookies)
+  const finalCookies = mergeCookies(cookies, updatedCookies || "")
 
   const token = signToken({ cookies: finalCookies, account: { login, city } })
   return { token }

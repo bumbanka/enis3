@@ -1,6 +1,5 @@
 import TelegramBot from "node-telegram-bot-api"
-import { loginUser, getLoginSession, getYears, getTerms, getGrades, getDiary, createTokenFromCookies } from "./api.js"
-import { encrypt, decrypt } from "./crypto.js"
+import { loginUser, getYears, getTerms, getGrades, getDiary } from "./api.js"
 import dotenv from "dotenv"
 dotenv.config()
 
@@ -175,126 +174,31 @@ bot.on("message", async (msg) => {
   if (session.step === "enter_password") {
     session.data.password = text
     session.step = "logging_in"
-    // Сначала пробуем войти без капчи — как делает enis2
-    await tryLoginNoCaptcha(chatId, session)
-    return
-  }
-
-  if (session.step === "enter_captcha") {
-    const token = text.trim()
-    if (token.length < 20) {
-      await bot.sendMessage(chatId, "❌ Токен слишком короткий. Скопируй полный текст из консоли браузера:")
-      return
-    }
-    await tryLogin(chatId, session, token)
+    await doLogin(chatId, session)
     return
   }
 })
 
-async function sendCaptcha(chatId, session) {
-  try {
-    const msg = await bot.sendMessage(chatId, "⏳ Получаю сессию...")
-    const { cookies, sitekey } = await getLoginSession(session.data.city)
-    session.data.cookies = cookies
-    await bot.deleteMessage(chatId, msg.message_id).catch(() => {})
-
-    if (sitekey) {
-      // Отправляем инструкцию для ручного решения капчи
-      session.step = "enter_captcha"
-      const loginUrl = `https://sms.${session.data.city}.nis.edu.kz/root/Account/Login`
-      await bot.sendMessage(chatId,
-        `🔐 *Нужно решить капчу вручную:*
-
-` +
-        `1. Открой эту ссылку:
-${loginUrl}
-
-` +
-        `2. Реши капчу (галочка "Я не робот")
-
-` +
-        `3. Открой консоль браузера:
-` +
-        `   • На ПК: нажми *F12* → вкладка *Console*
-` +
-        `   • На телефоне: используй браузер Kiwi → F12
-
-` +
-        `4. Вставь эту команду и нажми Enter:
-` +
-        `\`grecaptcha.getResponse()\`
-
-` +
-        `5. Скопируй длинный текст который появится (начинается с 03A...) и отправь его сюда 👇`,
-        { parse_mode: "Markdown" }
-      )
-    } else {
-      // Капчи нет — логинимся сразу
-      await tryLogin(chatId, session, "")
-    }
-  } catch (e) {
-    console.error("Captcha error:", e.message)
-    await bot.sendMessage(chatId, `❌ Ошибка: ${e.message}\nПопробуй /login ещё раз.`)
-    session.step = "idle"
-  }
-}
-
-async function tryLoginNoCaptcha(chatId, session) {
+async function doLogin(chatId, session) {
   try {
     await bot.sendMessage(chatId, "⏳ Выполняю вход...")
-    // Получаем куки со страницы логина
-    const { cookies } = await getLoginSession(session.data.city)
-    session.data.cookies = cookies
-    // Пробуем войти без капчи
     const result = await loginUser({
       city: session.data.city,
       login: session.data.login,
       password: session.data.password,
-      captchaInput: "",
-      cookies,
     })
     session.token = result.token
     session.step = "idle"
     await bot.sendMessage(chatId, "✅ Вход выполнен! Выбери действие:", mainMenu())
   } catch (e) {
     console.error("Login error:", e.message)
-    // Если сервер требует капчу — просим ввести вручную
-    if (e.message?.toLowerCase().includes("капч") || e.message?.toLowerCase().includes("captcha")) {
-      session.step = "enter_captcha"
-      const loginUrl = `https://sms.${session.data.city}.nis.edu.kz/root/Account/Login`
-      await bot.sendMessage(chatId,
-        `🔐 *Сервер требует капчу.*\n\n` +
-        `1. Открой: ${loginUrl}\n` +
-        `2. Введи свой логин и пароль на сайте\n` +
-        `3. Реши капчу и войди\n` +
-        `4. Открой F12 → Application → Cookies\n` +
-        `5. Скопируй значение куки \`.ASPXAUTH\` и отправь сюда 👇`,
-        { parse_mode: "Markdown" }
-      )
-    } else {
-      await bot.sendMessage(chatId, `❌ Ошибка: ${e.message}\nПопробуй /login ещё раз.`)
-      session.step = "idle"
-    }
+    await bot.sendMessage(chatId, `❌ Ошибка входа: ${e.message}
+
+Проверь логин и пароль и попробуй /login ещё раз.`)
+    session.step = "idle"
   }
 }
 
-async function tryLogin(chatId, session, aspxauthCookie) {
-  try {
-    await bot.sendMessage(chatId, "⏳ Пробую войти через куки...")
-    const token = createTokenFromCookies(
-      session.data.cookies || "",
-      aspxauthCookie,
-      session.data.login,
-      session.data.city
-    )
-    session.token = token
-    session.step = "idle"
-    await bot.sendMessage(chatId, "✅ Вход выполнен! Выбери действие:", mainMenu())
-  } catch (e) {
-    await bot.sendMessage(chatId, `❌ Ошибка: ${e.message}\nПопробуй /login ещё раз.`)
-    session.step = "idle"
-  }
-}
 
 async function startGrades(chatId, session) {
   try {
