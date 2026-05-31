@@ -193,7 +193,7 @@ export async function solveRecaptcha(sitekey, pageUrl) {
 }
 
 // Войти в систему
-export async function loginUser({ city, login, password }) {
+export async function loginUser({ city, login, password, captchaToken = "" }) {
   const baseUrl = `https://sms.${city}.nis.edu.kz`
 
   // Шаг 1: загружаем страницу логина — получаем куки и verification token
@@ -217,7 +217,7 @@ export async function loginUser({ city, login, password }) {
   const params = new URLSearchParams()
   params.append("login", login)
   params.append("password", password)
-  params.append("captchaInput", "")
+  params.append("captchaInput", captchaToken)
   params.append("twoFactorAuthCode", "")
   params.append("application2FACode", "")
   if (verificationToken) {

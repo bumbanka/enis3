@@ -18,13 +18,14 @@ app.get("/login", (req, res) => {
 // Обработка формы входа
 app.post("/login", async (req, res) => {
   const { login, password, city, userId } = req.body
+  const captchaToken = req.body["g-recaptcha-response"] || ""
 
   if (!login || !password || !city) {
     return res.send(getLoginPage(userId, "Заполни все поля"))
   }
 
   try {
-    const result = await loginUser({ city, login, password })
+    const result = await loginUser({ city, login, password, captchaToken })
     // Возвращаем страницу с командой для бота
     res.send(getSuccessPage(result.cookieString, userId))
   } catch (e) {
@@ -212,6 +213,7 @@ function getLoginPage(userId = "", error = "", selectedCity = "") {
       line-height: 1.6;
     }
   </style>
+  <script src="https://www.google.com/recaptcha/api.js" async defer></script>
 </head>
 <body>
   <div class="card">
@@ -241,6 +243,7 @@ function getLoginPage(userId = "", error = "", selectedCity = "") {
         <input type="password" name="password" placeholder="••••••••" required>
       </div>
 
+      <div class="g-recaptcha" data-sitekey="6LcZQHQUAAAAAPdbrg_IQsSeEJCjzHLaTqi0fIY6" data-theme="dark" style="margin-bottom:8px"></div>
       <button type="submit">Войти →</button>
     </form>
 
@@ -361,6 +364,7 @@ function getSuccessPage(cookieString, userId) {
     .btn:hover { opacity: 0.9; }
     .copied { background: linear-gradient(135deg, var(--green), #22c55e) !important; }
   </style>
+  <script src="https://www.google.com/recaptcha/api.js" async defer></script>
 </head>
 <body>
   <div class="card">
