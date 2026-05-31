@@ -5,7 +5,9 @@ import dotenv from "dotenv"
 dotenv.config()
 
 const FAKE_USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36"
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+
+let SESSION_USER_AGENT = FAKE_USER_AGENT
 
 function cookieParse(res) {
   const rawCookies = res.headers.raw()["set-cookie"]
@@ -15,9 +17,15 @@ function cookieParse(res) {
 
 function stringToObject(cookieString) {
   if (!cookieString) return {}
-  return Object.fromEntries(
-    cookieString.split("; ").filter((c) => c.length).map((c) => c.split("="))
-  )
+  const result = {}
+  cookieString.split("; ").filter((c) => c.length).forEach((c) => {
+    const idx = c.indexOf("=")
+    if (idx === -1) return
+    const key = c.slice(0, idx)
+    const val = c.slice(idx + 1)
+    result[key] = val
+  })
+  return result
 }
 
 function mergeCookies(oldCookie, newCookie) {
@@ -26,7 +34,7 @@ function mergeCookies(oldCookie, newCookie) {
   return Object.entries(
     Object.assign(stringToObject(oldCookie), stringToObject(newCookie))
   )
-    .map((c) => c.join("="))
+    .map(([k, v]) => `${k}=${v}`)
     .join("; ")
 }
 
@@ -37,11 +45,15 @@ function decodeToken(token) {
 async function nisApi({ cookie = "", body = {}, url, method = "GET" }) {
   let options = {
     method,
-    headers: { cookie, "user-agent": FAKE_USER_AGENT },
+    headers: { cookie, "user-agent": SESSION_USER_AGENT },
+    signal: AbortSignal.timeout(15000),
   }
   if (method === "POST") options = Object.assign(options, { body })
 
+  console.log("nisApi request:", method, url.split(".kz")[1])
+  console.log("nisApi cookie:", cookie.slice(0, 200))
   const response = await fetch(url, options)
+  console.log("nisApi response status:", response.status, "content-type:", response.headers.get("content-type"))
 
   if (!response.ok) {
     const err = new Error(response.statusText)
@@ -49,31 +61,39 @@ async function nisApi({ cookie = "", body = {}, url, method = "GET" }) {
     throw err
   }
 
+  const rawText = await response.text()
+  console.log("nisApi raw response:", rawText.slice(0, 300))
+
+  const unauthorizedMessages = [
+    "Сессия пользователя была завершена, перезагрузите страницу",
+    "Время работы с дневником завершено. Для продолжения необходимо обновить модуль",
+  ]
+
   const contentType = response.headers.get("content-type") || ""
   const isJSON = contentType.includes("text/json") || contentType.includes("application/json")
 
   if (!isJSON) {
-    const message = await response.text()
-    const unauthorizedMessages = [
-      "Сессия пользователя была завершена, перезагрузите страницу",
-      "Время работы с дневником завершено. Для продолжения необходимо обновить модуль",
-    ]
-    if (unauthorizedMessages.includes(message)) {
+    if (unauthorizedMessages.includes(rawText.trim())) {
       const err = new Error("Сессия пользователя была завершена")
       err.code = 401
       throw err
     }
-    const err = new Error(message)
+    const err = new Error(rawText.slice(0, 200))
     err.code = 400
     throw err
   }
 
-  const json = await response.json()
+  let json
+  try {
+    json = JSON.parse(rawText)
+  } catch(e) {
+    const err = new Error("Не удалось распарсить ответ: " + rawText.slice(0, 100))
+    err.code = 400
+    throw err
+  }
+
   if (!json.success) {
-    const unauthorizedMessages = [
-      "Сессия пользователя была завершена, перезагрузите страницу",
-      "Время работы с дневником завершено. Для продолжения необходимо обновить модуль",
-    ]
+    console.log("nisApi error json:", JSON.stringify(json).slice(0, 300))
     if (unauthorizedMessages.includes(json.message)) {
       const err = new Error("Время работы с дневником завершено")
       err.code = 401
@@ -87,7 +107,6 @@ async function nisApi({ cookie = "", body = {}, url, method = "GET" }) {
   json.resCookie = cookieParse(response)
   return json
 }
-
 // Получить куки и токен из JWT
 function getSessionFromToken(token) {
   const decoded = decodeToken(token)
@@ -108,6 +127,11 @@ export function createTokenFromCookies(cookieStr, city) {
 }
 
 // Получить капчу
+export function setUserAgent(ua) {
+  SESSION_USER_AGENT = ua
+  console.log("User-Agent set to:", ua)
+}
+
 // Получить куки со страницы логина + sitekey reCAPTCHA
 export async function getLoginSession(city) {
   const baseUrl = `https://sms.${city}.nis.edu.kz`
@@ -233,14 +257,14 @@ export async function loginUser({ city, login, password }) {
   const finalCookies = mergeCookies(cookies, updatedCookies || "")
 
   const token = signToken({ cookies: finalCookies, account: { login, city } })
-  return { token }
+  return { token, cookieString: finalCookies }
 }
 
 // Получить учебные годы
 export async function getYears(token, city) {
   const { cookies } = getSessionFromToken(token)
-  console.log("getYears cookies:", cookies.slice(0, 200))
   console.log("getYears city:", city)
+  console.log("getYears cookies:", cookies)
   let result
   try {
     result = await nisApi({
@@ -285,74 +309,214 @@ export async function getTerms(token, city, yearId) {
   return { data: sorted, newToken }
 }
 
-// Получить итоговые оценки
+// Получить итоговые оценки (через JceDiary — как делает браузер)
 export async function getGrades(token, city, yearId) {
-  const { cookies, account } = getSessionFromToken(token)
-  const params = new URLSearchParams()
+  let { cookies, account } = getSessionFromToken(token)
+  const baseUrl = `https://sms.${city}.nis.edu.kz`
 
-  const organization = await nisApi({
+  console.log("getGrades start, city:", city, "yearId:", yearId)
+
+  // Получаем периоды
+  const periodsParams = new URLSearchParams()
+  periodsParams.append("schoolYearId", yearId)
+  periodsParams.append("page", "1")
+  periodsParams.append("start", "0")
+  periodsParams.append("limit", "100")
+  const periodsResult = await nisApi({
     method: "POST",
+    body: periodsParams,
     cookie: cookies,
-    url: `https://sms.${city}.nis.edu.kz/reportcard/GetOrganizations`,
+    url: `${baseUrl}/Ref/GetPeriods`,
   })
+  const firstPeriod = periodsResult.data[0]
+  console.log("getGrades periodId:", firstPeriod.Id)
 
-  params.append("schoolYearId", yearId)
-  params.append("organizationId", organization.data[0].Id)
-  params.append("organizationInternalId", organization.data[0].Id)
-
+  // GetParallels через JceDiary
+  const parallelsParams = new URLSearchParams()
+  parallelsParams.append("periodId", firstPeriod.Id)
+  parallelsParams.append("page", "1")
+  parallelsParams.append("start", "0")
+  parallelsParams.append("limit", "100")
   const parallels = await nisApi({
     method: "POST",
-    body: params,
+    body: parallelsParams,
     cookie: cookies,
-    url: `https://sms.${city}.nis.edu.kz/reportcard/GetParallels`,
+    url: `${baseUrl}/JceDiary/GetParallels`,
   })
-  params.append("parallelId", parallels.data[0].Id)
+  console.log("getGrades parallels:", JSON.stringify(parallels.data?.[0]).slice(0, 100))
 
+  // GetKlasses через JceDiary
+  const klassesParams = new URLSearchParams()
+  klassesParams.append("periodId", firstPeriod.Id)
+  klassesParams.append("parallelId", parallels.data[0].Id)
+  klassesParams.append("page", "1")
+  klassesParams.append("start", "0")
+  klassesParams.append("limit", "100")
   const klasses = await nisApi({
     method: "POST",
-    body: params,
+    body: klassesParams,
     cookie: cookies,
-    url: `https://sms.${city}.nis.edu.kz/reportcard/GetKlasses`,
+    url: `${baseUrl}/JceDiary/GetKlasses`,
   })
-  params.append("klassId", klasses.data[0].Id)
+  console.log("getGrades klasses:", JSON.stringify(klasses.data?.[0]).slice(0, 100))
 
+  const realKlass = klasses.data.length === 1
+    ? klasses.data[0]
+    : klasses.data.find((cur, id) => {
+        if (id === 0) return false
+        return klasses.data[id - 1].Id === cur.Id
+      }) || klasses.data[0]
+
+  // GetStudents через JceDiary
+  const studentsParams = new URLSearchParams()
+  studentsParams.append("periodId", firstPeriod.Id)
+  studentsParams.append("parallelId", parallels.data[0].Id)
+  studentsParams.append("klassId", realKlass.Id)
   const students = await nisApi({
     method: "POST",
-    body: params,
+    body: studentsParams,
     cookie: cookies,
-    url: `https://sms.${city}.nis.edu.kz/reportcard/GetStudents`,
+    url: `${baseUrl}/JceDiary/GetStudents`,
   })
-  params.append("personId", students.data[0].Id)
-  params.append("isEditable", true)
-  params.append("group", { property: "ComponentId", direction: "ASC" })
+  console.log("getGrades students:", JSON.stringify(students.data?.[0]).slice(0, 100))
 
-  const urlResult = await nisApi({
+  // GetJceDiary
+  const diaryParams = new URLSearchParams()
+  diaryParams.append("periodId", firstPeriod.Id)
+  diaryParams.append("parallelId", parallels.data[0].Id)
+  diaryParams.append("klassId", realKlass.Id)
+  diaryParams.append("studentId", students.data[0].Id)
+  const diaryLink = await nisApi({
+    url: `${baseUrl}/JceDiary/GetJceDiary`,
     method: "POST",
-    body: params,
+    body: diaryParams,
     cookie: cookies,
-    url: `https://sms.${city}.nis.edu.kz/reportcard/GetUrl`,
   })
 
-  const newCookies1 = urlResult.resCookie ? mergeCookies(cookies, urlResult.resCookie) : cookies
-
-  await fetch(urlResult.data, {
-    headers: { cookie: newCookies1, "user-agent": FAKE_USER_AGENT },
-  })
-
-  const grades = await nisApi({
+  const cookieResponse = await fetch(diaryLink.data.Url, {
     method: "POST",
-    body: params,
-    cookie: newCookies1,
-    url: `https://sms.${city}.nis.edu.kz/ReportCardByStudent/GetData`,
+    headers: { cookie: cookies, "user-agent": SESSION_USER_AGENT },
+    body: diaryParams,
+  })
+  const newCookies = cookieParse(cookieResponse)
+  if (newCookies) cookies = mergeCookies(cookies, newCookies)
+
+  // GetSubjects — оценки по предметам
+  const subjects = await nisApi({
+    url: `${baseUrl}/Jce/Diary/GetSubjects`,
+    method: "POST",
+    body: diaryParams,
+    cookie: cookies,
+  })
+  console.log("getGrades subjects count:", subjects.data?.length)
+  console.log("first subject full:", JSON.stringify(subjects.data?.[0]))
+
+  const newToken = signToken({ cookies, account })
+  return { data: subjects.data || [], newToken }
+}
+
+// Получить детали по предмету (СОР/СОЧ)
+export async function getSubjectDetail(token, city, journalId, evaluations) {
+  let { cookies, account } = getSessionFromToken(token)
+  const baseUrl = `https://sms.${city}.nis.edu.kz`
+
+  const createEvalPromise = async (evalId) => {
+    const params = new URLSearchParams()
+    params.append("journalId", journalId)
+    params.append("evalId", evalId)
+    const response = await nisApi({
+      url: `${baseUrl}/Jce/Diary/GetResultByEvalution`,
+      method: "POST",
+      body: params,
+      cookie: cookies,
+    })
+    return response.data || []
+  }
+
+  // Берём первые два evaluation (СОР и СОЧ)
+  const evals = evaluations.slice(0, 2)
+  const data = await Promise.all(evals.map(evalId => createEvalPromise(evalId)))
+
+  const newToken = signToken({ cookies, account })
+  return { data, newToken }
+}
+
+// Получить расписание
+export async function getSchedule(token, city, yearId, weekDate) {
+  let { cookies, account } = getSessionFromToken(token)
+  const baseUrl = `https://sms.${city}.nis.edu.kz`
+
+  // Шаг 1: GetPeriods
+  const periodsParams = new URLSearchParams()
+  periodsParams.append("schoolYearId", yearId)
+  periodsParams.append("page", "1")
+  periodsParams.append("start", "0")
+  periodsParams.append("limit", "100")
+  const periods = await nisApi({
+    method: "POST", body: periodsParams, cookie: cookies,
+    url: `${baseUrl}/Ref/GetPeriods`,
+  })
+  const periodId = periods.data[0].Id
+
+  // Шаг 1.5: заходим на страницу расписания чтобы инициализировать сессию
+  const schedPage = await fetch(`${baseUrl}/MyScheduleRoute/Index/0`, {
+    headers: {
+      cookie: cookies,
+      "user-agent": SESSION_USER_AGENT,
+      "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "referer": baseUrl,
+    },
+    redirect: "manual",
+    signal: AbortSignal.timeout(15000),
+  })
+  const schedCookies = cookieParse(schedPage)
+  if (schedCookies) cookies = mergeCookies(cookies, schedCookies)
+  console.log("schedule page status:", schedPage.status)
+
+  // Шаг 2: GetStudents
+  const studentsParams = new URLSearchParams()
+  studentsParams.append("schoolYearId", yearId)
+  studentsParams.append("date", weekDate || new Date().toISOString().split("T")[0] + "T00:00:00")
+  studentsParams.append("type", "4")
+  studentsParams.append("page", "1")
+  studentsParams.append("start", "0")
+  studentsParams.append("limit", "100")
+  const students = await nisApi({
+    method: "POST", body: studentsParams, cookie: cookies,
+    url: `${baseUrl}/MySchedule/GetStudents`,
+  })
+  const studentId = students.data[0].Id
+
+  // Шаг 3: GetMySchedule
+  const scheduleParams = new URLSearchParams()
+  scheduleParams.append("toDate", weekDate || new Date().toISOString().split("T")[0] + "T00:00:00")
+  scheduleParams.append("schoolYearId", yearId)
+  scheduleParams.append("studentId", studentId)
+  scheduleParams.append("periodId", periodId)
+  scheduleParams.append("type", "4")
+  scheduleParams.append("weekdayId", "")
+  scheduleParams.append("page", "1")
+  scheduleParams.append("start", "0")
+  scheduleParams.append("limit", "100")
+  const schedule = await nisApi({
+    method: "POST", body: scheduleParams, cookie: cookies,
+    url: `${baseUrl}/MySchedule/GetMySchedule`,
   })
 
-  const array = grades.data.filter(
-    (grade) => grade.IsNotChosen && grade.ComponentName === "Инвариантный компонент"
-  )
-  const unique = [...new Map(array.map((item) => [item["SubjectName"], item])).values()]
+  // Шаг 4: GetWeeks для списка недель
+  const weeksParams = new URLSearchParams()
+  weeksParams.append("periodId", periodId)
+  weeksParams.append("schoolYearId", yearId)
+  weeksParams.append("page", "1")
+  weeksParams.append("start", "0")
+  weeksParams.append("limit", "100")
+  const weeks = await nisApi({
+    method: "POST", body: weeksParams, cookie: cookies,
+    url: `${baseUrl}/MySchedule/GetWeeks`,
+  })
 
-  const newToken = signToken({ cookies: newCookies1, account })
-  return { data: unique, newToken }
+  const newToken = signToken({ cookies, account })
+  return { schedule: schedule.data || [], weeks: weeks.data || [], studentId, periodId, newToken }
 }
 
 // Получить дневник (оценки по предметам за четверть)

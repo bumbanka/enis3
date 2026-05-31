@@ -1,7 +1,8 @@
 import TelegramBot from "node-telegram-bot-api"
-import { getYears, getTerms, getGrades, getDiary, createTokenFromCookies } from "./api.js"
+import { getYears, getTerms, getGrades, getDiary, getSubjectDetail, getSchedule, createTokenFromCookies, setUserAgent } from "./api.js"
 import dotenv from "dotenv"
 dotenv.config()
+import "./server.js"
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true })
 
@@ -45,7 +46,8 @@ function mainMenu() {
   return {
     reply_markup: {
       keyboard: [
-        [{ text: "📊 Оценки за год" }, { text: "📓 Дневник" }],
+        [{ text: "📓 Дневник" }, { text: "📅 Расписание" }],
+        [{ text: "📊 Средний балл" }],
         [{ text: "👤 Профиль" }, { text: "🚪 Выйти" }],
       ],
       resize_keyboard: true,
@@ -74,18 +76,16 @@ bot.onText(/\/start/, async (msg) => {
 bot.onText(/\/login/, async (msg) => {
   const chatId = msg.chat.id
   const session = getSession(chatId)
-  session.step = "choose_city"
+  session.step = "idle"
   session.data = {}
 
-  const buttons = CITIES.map((c) => [{ text: c.name, callback_data: `city_${c.code}` }])
-  const chunks = []
-  for (let i = 0; i < buttons.length; i += 2) {
-    chunks.push(buttons.slice(i, i + 2).flat())
-  }
+  const webUrl = process.env.WEB_URL || `http://localhost:${process.env.WEB_PORT || 3000}`
+  const loginUrl = `${webUrl}/login?user=${chatId}`
 
-  await bot.sendMessage(chatId, "🏙 Выбери свой город:", {
-    reply_markup: { inline_keyboard: chunks },
-  })
+  await bot.sendMessage(chatId,
+    `🌐 Для входа открой эту ссылку в браузере:\n\n${loginUrl}\n\nВведи логин и пароль от НИС — бот автоматически получит нужные данные.`,
+    { reply_markup: { remove_keyboard: true } }
+  )
 })
 
 // /setcookies — ручной вход через куки браузера
@@ -156,7 +156,12 @@ ${baseUrl}/root/Account/Login
 /setcookies ApplicationAuth=XXX; Uralsk_SessionID=YYY; UserSessionKey=ZZZ
 
 ` +
-      `Куки действуют несколько дней, потом нужно повторить.`
+      `Куки действуют несколько дней, потом нужно повторить.
+
+Также отправь свой User-Agent браузера командой:
+/setuseragent ВАШ_USER_AGENT
+
+Чтобы узнать User-Agent открой в браузере: https://www.whatismybrowser.com/detect/what-is-my-user-agent/ и скопируй строку`
     )
     return
   }
@@ -168,6 +173,25 @@ ${baseUrl}/root/Account/Login
     const cookieStr = session.data.pendingCookies
     session.data.pendingCookies = null
     await saveCookies(chatId, session, cookieStr)
+    return
+  }
+
+  // Выбор недели расписания
+  if (data.startsWith("week_")) {
+    const weekDate = data.replace("week_", "")
+    await showSchedule(chatId, session, weekDate)
+    return
+  }
+
+  // Подробнее по предмету
+  if (data.startsWith("detail_")) {
+    const journalId = data.replace("detail_", "")
+    const subject = session.data.diarySubjects?.find(s => s.JournalId === journalId)
+    if (!subject) {
+      await bot.sendMessage(chatId, "❌ Предмет не найден. Обнови дневник.")
+      return
+    }
+    await showSubjectDetail(chatId, session, subject)
     return
   }
 
@@ -204,8 +228,12 @@ bot.on("message", async (msg) => {
 
   // Главное меню
   if (session.token) {
-    if (text === "📊 Оценки за год") {
-      await startGrades(chatId, session)
+    if (text === "📊 Средний балл") {
+      await showAverage(chatId, session)
+      return
+    }
+    if (text === "📅 Расписание") {
+      await startSchedule(chatId, session)
       return
     }
     if (text === "📓 Дневник") {
@@ -272,14 +300,13 @@ async function showGrades(chatId, session, yearId) {
       Final: "Итог",
     }
 
-    let text = "📊 *Оценки за год:*\n\n"
+    let text = "📊 *Оценки за четверть:*\n\n"
     for (const subject of result.data) {
-      text += `*${subject.SubjectName}*\n`
+      const name = subject.Name || subject.SubjectName || "Предмет"
       const parts = []
-      for (const [key, label] of Object.entries(GRADE_MAP)) {
-        if (subject[key]) parts.push(`${label}: ${subject[key]}`)
-      }
-      text += parts.join(" | ") + "\n\n"
+      if (subject.Score !== undefined && subject.Score !== null) parts.push(`Баллы: ${subject.Score}`)
+      if (subject.Mark !== undefined && subject.Mark !== null) parts.push(`Оценка: ${subject.Mark}`)
+      text += `*${name}*\n${parts.length ? parts.join(" | ") : "Нет оценок"}\n\n`
     }
 
     await bot.sendMessage(chatId, text, { parse_mode: "Markdown", ...mainMenu() })
@@ -331,18 +358,164 @@ async function showDiary(chatId, session, termId) {
       return
     }
 
+    // Сохраняем для кнопок
+    session.data.diarySubjects = result.data
+
     let text = "📓 *Дневник:*\n\n"
+    const buttons = []
     for (const subject of result.data) {
       text += `*${subject.Name}*\n`
-      if (subject.Score !== undefined) text += `Баллы: ${subject.Score}`
-      if (subject.Mark !== undefined) text += ` | Оценка: ${subject.Mark}`
-      text += "\n\n"
+      if (subject.Score !== null && subject.Score !== undefined) {
+        text += `Итог: ${subject.Score} (оценка: ${subject.Mark})\n`
+      }
+      text += "\n"
+      if (subject.Evaluations?.length) {
+        buttons.push([{ text: `🔍 ${subject.Name}`, callback_data: `detail_${subject.JournalId}` }])
+      }
     }
 
     await bot.sendMessage(chatId, text, { parse_mode: "Markdown", ...mainMenu() })
+    if (buttons.length) {
+      await bot.sendMessage(chatId, "Подробнее по предмету:", {
+        reply_markup: { inline_keyboard: buttons }
+      })
+    }
   } catch (e) {
     await handleError(chatId, session, e)
   }
+}
+
+async function showSubjectDetail(chatId, session, subject) {
+  try {
+    await bot.sendMessage(chatId, `⏳ Загружаю детали по "${subject.Name}"...`)
+    const result = await getSubjectDetail(session.token, session.data.city, subject.JournalId, subject.Evaluations)
+    session.token = result.newToken || session.token
+
+    let text = `📚 *${subject.Name}*\n`
+    if (subject.Score !== null && subject.Score !== undefined) {
+      text += `Итог: ${subject.Score} (оценка: ${subject.Mark})\n`
+    }
+    text += "\n"
+
+    for (const evGroup of result.data) {
+      if (!evGroup?.length) continue
+      const first = evGroup[0]
+      const typeName = first?.ShortName || "СОР/СОЧ"
+      text += `*${typeName}:*\n`
+      for (const item of evGroup) {
+        const score = item.Score !== null && item.Score !== undefined ? item.Score : "—"
+        const max = item.MaxScore ? `/${item.MaxScore}` : ""
+        text += `  ${item.Name || "Задание"}: ${score}${max}\n`
+      }
+      text += "\n"
+    }
+
+    await bot.sendMessage(chatId, text, { parse_mode: "Markdown" })
+  } catch (e) {
+    await handleError(chatId, session, e)
+  }
+}
+
+
+async function startSchedule(chatId, session) {
+  try {
+    await bot.sendMessage(chatId, "⏳ Загружаю расписание...")
+    const years = await getYears(session.token, session.data.city)
+    session.token = years.newToken || session.token
+    const actualYear = years.data.find(y => y.isActual) || years.data[0]
+    session.data.yearId = actualYear.Id
+
+    const today = new Date().toISOString().split("T")[0] + "T00:00:00"
+    const result = await getSchedule(session.token, session.data.city, actualYear.Id, today)
+    session.token = result.newToken || session.token
+    session.data.scheduleWeeks = result.weeks
+
+    await showScheduleData(chatId, session, result.schedule, today)
+  } catch (e) {
+    await handleError(chatId, session, e)
+  }
+}
+
+async function showSchedule(chatId, session, weekDate) {
+  try {
+    await bot.sendMessage(chatId, "⏳ Загружаю расписание...")
+    const result = await getSchedule(session.token, session.data.city, session.data.yearId, weekDate)
+    session.token = result.newToken || session.token
+    await showScheduleData(chatId, session, result.schedule, weekDate)
+  } catch (e) {
+    await handleError(chatId, session, e)
+  }
+}
+
+async function showScheduleData(chatId, session, schedule, currentWeek) {
+  if (!schedule.length) {
+    await bot.sendMessage(chatId, "📭 Расписание пока нет.", mainMenu())
+    return
+  }
+
+  const DAY_NAMES = { 1: "Пн", 2: "Вт", 3: "Ср", 4: "Чт", 5: "Пт", 6: "Сб" }
+  const allDays = [1, 2, 3, 4, 5]
+
+  // Определяем рабочие дни из первого урока
+  const notWorking = schedule[0]?.NotWorkingDays || []
+  const workingDays = allDays.filter(d => !notWorking.includes(d))
+
+  let text = "📅 *Расписание:*\n\n"
+  for (const day of workingDays) {
+    text += `*${DAY_NAMES[day]}*\n`
+    for (const lesson of schedule) {
+      const records = lesson[`${day}_Records`]
+      if (!records?.length) continue
+      const r = records[0]
+      const cabinet = r.CabinetName ? ` (${r.CabinetName})` : ""
+      text += `  ${lesson.LessonNumber}. ${r.SubjectName}${cabinet}\n`
+    }
+    text += "\n"
+  }
+
+  // Кнопки выбора недели
+  const weeks = session.data.scheduleWeeks || []
+  const buttons = weeks.slice(0, 5).map(w => ([{
+    text: (w.value === currentWeek ? "✅ " : "") + w.name,
+    callback_data: `week_${w.value}`
+  }]))
+
+  await bot.sendMessage(chatId, text, { parse_mode: "Markdown", ...mainMenu() })
+  if (buttons.length) {
+    await bot.sendMessage(chatId, "Выбери неделю:", { reply_markup: { inline_keyboard: buttons } })
+  }
+}
+
+async function showAverage(chatId, session) {
+  const subjects = session.data.diarySubjects
+  if (!subjects?.length) {
+    await bot.sendMessage(chatId, "❌ Сначала открой Дневник чтобы загрузить оценки.", mainMenu())
+    return
+  }
+
+  const withScores = subjects.filter(s => s.Score !== null && s.Score !== undefined)
+  if (!withScores.length) {
+    await bot.sendMessage(chatId, "📭 Нет данных об оценках.", mainMenu())
+    return
+  }
+
+  const avg = withScores.reduce((sum, s) => sum + s.Score, 0) / withScores.length
+  const avgMark = withScores.reduce((sum, s) => sum + s.Mark, 0) / withScores.length
+
+  // Сортируем по баллам
+  const sorted = [...withScores].sort((a, b) => b.Score - a.Score)
+  const best = sorted.slice(0, 3)
+  const worst = sorted.slice(-3).reverse()
+
+  let text = `📊 *Средний балл:*\n\n`
+  text += `Средний балл: *${avg.toFixed(2)}*\n`
+  text += `Средняя оценка: *${avgMark.toFixed(1)}*\n\n`
+  text += `🏆 *Лучшие предметы:*\n`
+  for (const s of best) text += `  ${s.Name}: ${s.Score} (${s.Mark})\n`
+  text += `\n📉 *Слабые предметы:*\n`
+  for (const s of worst) text += `  ${s.Name}: ${s.Score} (${s.Mark})\n`
+
+  await bot.sendMessage(chatId, text, { parse_mode: "Markdown", ...mainMenu() })
 }
 
 async function showProfile(chatId, session) {
@@ -367,6 +540,13 @@ async function handleError(chatId, session, error) {
     await bot.sendMessage(chatId, `❌ Ошибка: ${error.message}`, mainMenu())
   }
 }
+
+bot.onText(/\/setuseragent (.+)/, async (msg, match) => {
+  const chatId = msg.chat.id
+  const ua = match[1].trim()
+  setUserAgent(ua)
+  await bot.sendMessage(chatId, "✅ User-Agent обновлён!")
+})
 
 console.log("🤖 Бот запущен!")
 
